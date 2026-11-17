@@ -63,6 +63,26 @@ CREATE TABLE IF NOT EXISTS calc_state (
     last_error TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
+
+-- 参考仪上传批次（每次上传整体替换 ref_points，批次表保留上传历史）
+CREATE TABLE IF NOT EXISTS ref_batches (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename      TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    rows_accepted INTEGER NOT NULL
+);
+
+-- 当前生效的参考点集（独立校准仪：UTC + 温度）
+CREATE TABLE IF NOT EXISTS ref_points (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id    INTEGER NOT NULL REFERENCES ref_batches(id),
+    row_no      INTEGER NOT NULL,          -- 参考 CSV 内的原始行号（数据行从 1 起）
+    utc_time    TEXT NOT NULL,
+    utc_ts      REAL NOT NULL,             -- epoch 秒（毫秒精度），用于偏差匹配
+    temperature REAL NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ref_points_ts ON ref_points(utc_ts);
 """
 
 

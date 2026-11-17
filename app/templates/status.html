@@ -46,6 +46,21 @@
 <p class="hint">尚未录入锚点。请先到「校时锚点」页为各段录入两枚锚点。</p>
 {% endif %}
 
+<h3>参考仪数据</h3>
+<div class="card">
+  {% if st.reference.count %}
+  <p>
+    参考点：<b>{{ st.reference.count }}</b> / {{ st.reference.max }}
+    覆盖时段 (UTC)：<span class="mono">{{ st.reference.window.start }}</span> ～
+    <span class="mono">{{ st.reference.window.end }}</span><br>
+    允许对时偏差：<b>{{ st.reference.deviation_s }} s</b>　温差限值：<b>{{ st.reference.temp_limit }} ℃</b>
+  </p>
+  {% else %}
+  <p class="hint">尚无参考点。请到「<a href="/reference">参考数据</a>」页上传参考仪 CSV。</p>
+  {% endif %}
+  <p><a href="/verify">前往「温度核对」→</a></p>
+</div>
+
 <h3>上传批次</h3>
 {% if st.batches %}
 <table>

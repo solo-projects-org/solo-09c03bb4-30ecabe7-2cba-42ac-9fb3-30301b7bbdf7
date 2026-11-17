@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}温度核对 - 冷链记录仪校时平台{% endblock %}
+{% block content %}
+<h2>温度核对（参考仪 ↔ 记录仪）</h2>
+
+<div class="card">
+  <form method="post" action="/verify">
+    <p><label>允许对时偏差</label>
+       <input type="number" name="deviation_s" step="any" min="0" max="86400" required
+              value="{{ info.deviation_s }}">
+       <label style="min-width:70px">温差限值</label>
+       <input type="number" name="temp_limit" step="any" min="0" max="100" required
+              value="{{ info.temp_limit }}">
+       <button type="submit">保存参数并重算</button></p>
+  </form>
+  <p class="hint">
+    核对范围：参考仪覆盖时段内的<b>已发布校时读数</b>。只有双方在偏差内均只有一个候选时才配对，
+    读数不复用；多候选列为冲突，单侧缺点列为缺失；冲突或缺失不得判为温度合格。
+  </p>
+  {% if error %}<div class="msg err">{{ error }}</div>{% endif %}
+</div>
+
+{% if not result %}
+<p class="hint">尚无参考点，请先到「<a href="/reference">参考数据</a>」页上传参考仪 CSV。</p>
+{% else %}
+
+{% if result.currency == 'stale' %}
+<div class="msg err" style="background:#fff4e5;border:1px solid #e0a030">
+  <b>旧版回看</b>（基于校时版本 v{{ result.calc_version }}）：
+  {% for r in result.stale_reasons %}{{ r }}{{ "；" if not loop.last }}{% endfor %}。<br>
+  以下结果<b>不能作为当前合格结论</b>，请待重算追平后刷新本页复核。
+</div>
+{% else %}
+<div class="msg ok">
+  基于当前完整发布版：校时版本 v{{ result.calc_version }}
+  （数据代次 {{ result.state_generation }}，已校代次 {{ result.calibrated_generation }}，
+  核验尝试 {{ result.attempts }} 次）。
+</div>
+{% endif %}
+
+<div class="card">
+  {% if result.qualified %}
+  <h3 class="ok" style="margin-top:0">✓ 一致（温度核对合格）</h3>
+  <p>全部参考点与记录仪读数唯一配对，且温差均在限值内。</p>
+  {% elif result.verdict == 'consistent' %}
+  <h3 class="warn" style="margin-top:0">配对一致（仅旧版回看，非当前结论）</h3>
+  <p>该版本下全部唯一配对且无超限，但结果基于旧版，不能显示为当前合格。</p>
+  {% elif result.verdict == 'no_reference' %}
+  <h3 class="warn" style="margin-top:0">无参考数据</h3>
+  {% else %}
+  <h3 class="err" style="margin-top:0">✗ 不一致（不得判为温度合格）</h3>
+  <p>
+    {% if result.counts.over_limit %}超限 {{ result.counts.over_limit }} 项；{% endif %}
+    {% if result.counts.conflict_clusters %}冲突 {{ result.counts.conflict_clusters }} 簇；{% endif %}
+    {% if result.counts.missing_refs %}记录仪侧缺失 {{ result.counts.missing_refs }} 点；{% endif %}
+    {% if result.counts.missing_recs %}参考侧缺失 {{ result.counts.missing_recs }} 点。{% endif %}
+  </p>
+  {% endif %}
+  <p>
+    覆盖时段 (UTC)：<span class="mono">{{ result.window.start }}</span> ～
+    <span class="mono">{{ result.window.end }}</span><br>
+    参考点 {{ result.counts.refs_total }} 个；时段内校时读数 {{ result.counts.recorders_in_window }} 个
+    （时段外 {{ result.counts.recorders_out_of_window }} 个不参与核对）；
+    配对 {{ result.counts.pairs }} 对；超限 {{ result.counts.over_limit }} 项；
+    冲突 {{ result.counts.conflict_clusters }} 簇
+    （参考侧 {{ result.counts.conflict_refs }} 点 / 记录仪侧 {{ result.counts.conflict_recs }} 点）；
+    缺失：记录仪侧 {{ result.counts.missing_refs }} 点、参考侧 {{ result.counts.missing_recs }} 点。
+  </p>
+</div>
+
+<h3>配对温差（{{ result.counts.pairs }} 对）</h3>
+{% if result.pairs %}
+<table>
+  <tr><th>参考行号</th><th>参考 UTC</th><th>参考温度</th>
+      <th>批次号</th><th>原行号</th><th>段号</th><th>本地秒数</th><th>校时后 UTC</th><th>记录仪温度</th>
+      <th>对时差 (s)</th><th>温差 (℃)</th><th>锚点版本</th><th>校时版本</th><th>判定</th></tr>
+  {% for p in result.pairs %}
+  <tr{% if p.over_limit %} style="background:#fdecea"{% endif %}>
+    <td>{{ p.ref.row_no }}</td>
+    <td class="mono">{{ p.ref.utc_time }}</td><td>{{ p.ref.temperature }}</td>
+    <td>{{ p.rec.batch_id }}</td><td>{{ p.rec.row_no }}</td><td>{{ p.rec.segment }}</td>
+    <td class="mono">{{ p.rec.local_seconds }}</td>
+    <td class="mono">{{ p.rec.utc_time }}</td><td>{{ p.rec.temperature }}</td>
+    <td>{{ p.time_delta_s }}</td>
+    <td><b>{{ p.temp_diff }}</b></td>
+    <td>v{{ p.rec.anchor_version }}</td><td>v{{ p.rec.calc_version }}</td>
+    <td>{% if p.over_limit %}<span class="err">超限</span>{% else %}<span class="ok">正常</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="hint">无配对。</p>
+{% endif %}
+
+{% if result.over_limit %}
+<h3 class="err">超限项（{{ result.counts.over_limit }} 项，|温差| &gt; {{ result.params.temp_limit }} ℃）</h3>
+<table>
+  <tr><th>参考行号</th><th>参考 UTC</th><th>参考温度</th>
+      <th>批次号</th><th>原行号</th><th>记录仪温度</th><th>温差 (℃)</th><th>锚点版本</th></tr>
+  {% for p in result.over_limit %}
+  <tr style="background:#fdecea">
+    <td>{{ p.ref.row_no }}</td>
+    <td class="mono">{{ p.ref.utc_time }}</td><td>{{ p.ref.temperature }}</td>
+    <td>{{ p.rec.batch_id }}</td><td>{{ p.rec.row_no }}</td>
+    <td>{{ p.rec.temperature }}</td><td><b>{{ p.temp_diff }}</b></td>
+    <td>v{{ p.rec.anchor_version }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if result.conflicts %}
+<h3 class="err">冲突（{{ result.counts.conflict_clusters }} 簇：偏差内存在多候选，未配对）</h3>
+{% for c in result.conflicts %}
+<div class="card">
+  <p><b>冲突簇 {{ loop.index }}</b>：参考侧 {{ c.refs|length }} 点 ↔ 记录仪侧 {{ c.recs|length }} 点</p>
+  <table>
+    <tr><th>侧</th><th>行号</th><th>UTC</th><th>温度</th><th>批次/版本</th></tr>
+    {% for r in c.refs %}
+    <tr><td>参考仪</td><td>{{ r.row_no }}</td><td class="mono">{{ r.utc_time }}</td>
+        <td>{{ r.temperature }}</td><td>参考批次 {{ r.ref_batch_id }}</td></tr>
+    {% endfor %}
+    {% for r in c.recs %}
+    <tr><td>记录仪</td><td>{{ r.row_no }}</td><td class="mono">{{ r.utc_time }}</td>
+        <td>{{ r.temperature }}</td>
+        <td>批次 {{ r.batch_id }}，锚点 v{{ r.anchor_version }}，段 {{ r.segment }} 秒 {{ r.local_seconds }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if result.missing.recorder_side %}
+<h3 class="err">缺失：参考点无对应记录仪读数（{{ result.counts.missing_refs }} 点）</h3>
+<table>
+  <tr><th>参考行号</th><th>参考 UTC</th><th>参考温度</th><th>参考批次</th></tr>
+  {% for r in result.missing.recorder_side %}
+  <tr><td>{{ r.row_no }}</td><td class="mono">{{ r.utc_time }}</td>
+      <td>{{ r.temperature }}</td><td>{{ r.ref_batch_id }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if result.missing.reference_side %}
+<h3 class="err">缺失：记录仪读数无对应参考点（{{ result.counts.missing_recs }} 点）</h3>
+<table>
+  <tr><th>批次号</th><th>原行号</th><th>段号</th><th>本地秒数</th><th>校时后 UTC</th>
+      <th>温度</th><th>锚点版本</th></tr>
+  {% for r in result.missing.reference_side %}
+  <tr><td>{{ r.batch_id }}</td><td>{{ r.row_no }}</td><td>{{ r.segment }}</td>
+      <td class="mono">{{ r.local_seconds }}</td><td class="mono">{{ r.utc_time }}</td>
+      <td>{{ r.temperature }}</td><td>v{{ r.anchor_version }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% endif %}
+{% endblock %}

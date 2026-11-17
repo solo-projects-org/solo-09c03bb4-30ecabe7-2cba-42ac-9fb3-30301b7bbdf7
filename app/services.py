@@ -1,9 +1,12 @@
 """领域服务：上传入库、锚点维护、查询、状态汇总。
 
 所有写操作在单事务内完成并递增 state_generation（触发后续重算）。
+参考点集（ref_points）只服务于温度核对、不影响校时结果，
+因此替换参考集与保存核对参数不递增 state_generation。
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 from .config import Settings
@@ -225,4 +228,115 @@ def get_status(db: Database, cfg: Settings) -> dict:
         "anchors": list_anchors(db),
         "batches": batches,
         "pending_count": len(pending_readings(db)),
+        "reference": reference_info(db, cfg),
+    }
+
+
+# ---------------------------------------------------------------- 参考仪核对
+
+def validate_verify_params(deviation_s, temp_limit) -> tuple[float, float]:
+    """校验允许对时偏差（秒）与温差限值（℃），返回规范化后的浮点值。"""
+    try:
+        dev = float(str(deviation_s).strip())
+        lim = float(str(temp_limit).strip())
+    except (TypeError, ValueError):
+        raise ServiceError("允许对时偏差与温差限值须为数值", code="BAD_VERIFY_PARAM")
+    if not math.isfinite(dev) or not (0 < dev <= 86400):
+        raise ServiceError("允许对时偏差须为 (0, 86400] 秒", code="BAD_VERIFY_PARAM")
+    if not math.isfinite(lim) or not (0 < lim <= 100):
+        raise ServiceError("温差限值须为 (0, 100] ℃", code="BAD_VERIFY_PARAM")
+    return dev, lim
+
+
+def replace_reference(
+    db: Database,
+    cfg: Settings,
+    filename: str,
+    rows: list[dict],          # [{"row_no", "utc"(datetime), "temperature"}]
+    deviation_s: float,
+    temp_limit: float,
+) -> tuple[int, int]:
+    """整体替换参考点集（单事务），并保存核对参数。返回 (参考批次号, 接纳行数)。
+
+    参考集只影响温度核对、不影响校时结果，故不递增 state_generation。
+    """
+    if not rows:
+        raise ServiceError("没有可入库的数据行", code="EMPTY_BATCH")
+    if len(rows) > cfg.max_ref_points:
+        raise ServiceError(
+            f"参考点超过上限 {cfg.max_ref_points}（本批 {len(rows)} 行），整批已拒绝",
+            code="POINT_LIMIT_EXCEEDED",
+        )
+    with db.tx() as cur:
+        now = utcnow_iso()
+        batch_id = cur.execute(
+            "INSERT INTO ref_batches(filename, created_at, rows_accepted) VALUES (?, ?, ?)",
+            (filename[:200], now, len(rows)),
+        ).lastrowid
+        cur.execute("DELETE FROM ref_points")  # 整体替换：旧参考集不再参与核对
+        cur.executemany(
+            "INSERT INTO ref_points(batch_id, row_no, utc_time, utc_ts, temperature, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    batch_id,
+                    r["row_no"],
+                    fmt_utc(r["utc"]),
+                    round(r["utc"].timestamp(), 3),   # 毫秒精度，与校时结果一致
+                    r["temperature"],
+                    now,
+                )
+                for r in rows
+            ],
+        )
+        cur.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('ref_deviation_s', ?)",
+            (repr(deviation_s),),
+        )
+        cur.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('ref_temp_limit', ?)",
+            (repr(temp_limit),),
+        )
+    return batch_id, len(rows)
+
+
+def get_verify_params(db: Database, cfg: Settings) -> tuple[float, float]:
+    """当前核对参数（允许对时偏差秒数、温差限值℃）；未设置时用配置默认值。"""
+    meta = {r["key"]: r["value"] for r in db.query("SELECT key, value FROM meta")}
+    dev = float(meta.get("ref_deviation_s", repr(cfg.ref_deviation_s)))
+    lim = float(meta.get("ref_temp_limit", repr(cfg.ref_temp_limit)))
+    return dev, lim
+
+
+def set_verify_params(db: Database, deviation_s: float, temp_limit: float) -> None:
+    """保存核对参数（不影响校时，不递增 state_generation）。"""
+    with db.tx() as cur:
+        cur.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('ref_deviation_s', ?)",
+            (repr(deviation_s),),
+        )
+        cur.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('ref_temp_limit', ?)",
+            (repr(temp_limit),),
+        )
+
+
+def reference_info(db: Database, cfg: Settings) -> dict:
+    """参考点集概况：点数、覆盖时段、核对参数、最近上传批次。"""
+    count = db.query_one("SELECT COUNT(*) AS c FROM ref_points")["c"]
+    window = None
+    if count:
+        row = db.query_one(
+            "SELECT MIN(utc_time) AS lo, MAX(utc_time) AS hi FROM ref_points"
+        )
+        window = {"start": row["lo"], "end": row["hi"]}
+    batch = db.query_one("SELECT * FROM ref_batches ORDER BY id DESC LIMIT 1")
+    dev, lim = get_verify_params(db, cfg)
+    return {
+        "count": count,
+        "max": cfg.max_ref_points,
+        "window": window,
+        "deviation_s": dev,
+        "temp_limit": lim,
+        "last_batch": dict(batch) if batch else None,
     }

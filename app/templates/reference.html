@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}参考数据 - 冷链记录仪校时平台{% endblock %}
+{% block content %}
+<h2>上传参考仪数据</h2>
+
+<div class="card">
+  <form method="post" action="/reference" enctype="multipart/form-data">
+    <p><input type="file" name="file" accept=".csv,text/csv" required></p>
+    <p><label>允许对时偏差</label>
+       <input type="number" name="deviation_s" step="any" min="0" max="86400" required
+              value="{{ info.deviation_s }}">
+       <span class="hint">秒，|参考点UTC − 校时读数UTC| ≤ 该值才算候选</span></p>
+    <p><label>温差限值</label>
+       <input type="number" name="temp_limit" step="any" min="0" max="100" required
+              value="{{ info.temp_limit }}">
+       <span class="hint">℃，|温差| ≤ 该值为合格</span></p>
+    <p><button type="submit">上传并替换参考集</button></p>
+  </form>
+  <p class="hint">
+    CSV 两列：<span class="mono">utc,temperature</span>
+    （或中文表头 <span class="mono">时间,温度</span>；无表头时按此顺序）。<br>
+    规则：单文件最多 {{ info.max }} 条，<b>每次上传整体替换旧参考集</b>；
+    任何一行不合格，整批拒绝入库。行号为数据行序号（从 1 起，不含表头）。<br>
+    时间一律按 UTC，形如 <span class="mono">2026-01-01 08:00:00</span> 或
+    <span class="mono">2026-01-01T08:00:00Z</span>。
+  </p>
+</div>
+
+{% if error %}
+<div class="msg err">
+  <b>{{ error.message }}</b>
+  {% if error.errors %}
+  <table>
+    <tr><th>行号</th><th>问题</th></tr>
+    {% for e in error.errors %}
+    <tr><td>{{ e.row }}</td><td>{{ e.message }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% endif %}
+
+<h3>当前参考点集</h3>
+{% if info.count %}
+<div class="card">
+  <p>
+    参考点：<b>{{ info.count }}</b> / {{ info.max }}
+    覆盖时段 (UTC)：<span class="mono">{{ info.window.start }}</span> ～
+    <span class="mono">{{ info.window.end }}</span>
+  </p>
+  <p>
+    允许对时偏差：<b>{{ info.deviation_s }} s</b>　温差限值：<b>{{ info.temp_limit }} ℃</b>
+  </p>
+  {% if info.last_batch %}
+  <p class="hint">最近上传：参考批次 {{ info.last_batch.id }}（{{ info.last_batch.filename }}，
+     {{ info.last_batch.rows_accepted }} 行，{{ info.last_batch.created_at }}）</p>
+  {% endif %}
+  <p><a href="/verify">前往「温度核对」查看核对结果 →</a></p>
+</div>
+{% else %}
+<p class="hint">尚无参考点。上传后即可在「温度核对」页查看核对结果。</p>
+{% endif %}
+{% endblock %}

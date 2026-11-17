@@ -1,4 +1,4 @@
-"""FastAPI 入口：网页（上传 / 校时 / 按日查询 / 处理状态）+ JSON API。"""
+"""FastAPI 入口：网页（上传 / 校时 / 按日查询 / 参考数据 / 温度核对 / 处理状态）+ JSON API。"""
 from __future__ import annotations
 
 import logging
@@ -6,15 +6,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from . import services
+from . import services, verify
 from .calibration import RecalcWorker
 from .config import Settings
 from .csvparse import parse_csv_text
 from .db import Database
+from .refcsv import parse_ref_csv_text
 from .services import ServiceError
 from .timeutil import parse_utc
 
@@ -80,6 +81,22 @@ def create_app() -> FastAPI:
         batch_id = services.add_batch(db, cfg, file.filename or "", rows)
         trigger_recalc()
         return batch_id, len(rows)
+
+    async def handle_ref_upload(file: UploadFile, deviation_s, temp_limit) -> tuple[int, int]:
+        dev, lim = services.validate_verify_params(deviation_s, temp_limit)
+        raw = await file.read()
+        if len(raw) > MAX_UPLOAD_BYTES:
+            raise ServiceError("文件过大（上限 2MB）", code="FILE_TOO_LARGE")
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            raise ServiceError("文件编码须为 UTF-8", code="BAD_ENCODING")
+        rows, errors = parse_ref_csv_text(text, cfg.max_ref_points)
+        if errors:
+            raise ServiceError(f"CSV 校验失败（{len(errors)} 处），整批未入库",
+                               code="CSV_INVALID", errors=errors)
+        # 整体替换参考集；不影响校时，无需触发重算
+        return services.replace_reference(db, cfg, file.filename or "", rows, dev, lim)
 
     def redirect(path: str, msg: str, ok: bool = True) -> RedirectResponse:
         return RedirectResponse(
@@ -155,6 +172,47 @@ def create_app() -> FastAPI:
                       pending=pending[:200], pending_count=len(pending),
                       calc=services.calc_info(db), msg="", ok=1)
 
+    @app.get("/reference", response_class=HTMLResponse)
+    def reference_page(request: Request, msg: str = "", ok: int = 1):
+        info = services.reference_info(db, cfg)
+        return render(request, "reference.html", info=info, cfg=cfg, msg=msg, ok=ok)
+
+    @app.post("/reference", response_class=HTMLResponse)
+    async def reference_do(request: Request, file: UploadFile = File(...),
+                           deviation_s: str = Form(...), temp_limit: str = Form(...)):
+        try:
+            batch_id, n = await handle_ref_upload(file, deviation_s, temp_limit)
+        except ServiceError as exc:
+            return render(request, "reference.html",
+                          info=services.reference_info(db, cfg), cfg=cfg,
+                          error=exc, msg="", ok=1)
+        return redirect("/reference",
+                        f"参考批次 {batch_id} 已接纳 {n} 行（已整体替换旧参考集）")
+
+    @app.get("/verify", response_class=HTMLResponse)
+    def verify_page(request: Request, msg: str = "", ok: int = 1):
+        info = services.reference_info(db, cfg)
+        result = None
+        if info["count"] > 0:
+            result = verify.run_verification(db, info["deviation_s"], info["temp_limit"])
+        return render(request, "verify.html", info=info, result=result, msg=msg, ok=ok)
+
+    @app.post("/verify", response_class=HTMLResponse)
+    async def verify_params_do(request: Request):
+        form = await request.form()
+        info = services.reference_info(db, cfg)
+        try:
+            dev, lim = services.validate_verify_params(
+                form.get("deviation_s"), form.get("temp_limit"))
+        except ServiceError as exc:
+            result = None
+            if info["count"] > 0:
+                result = verify.run_verification(db, info["deviation_s"], info["temp_limit"])
+            return render(request, "verify.html", info=info, result=result,
+                          error=exc.message, msg="", ok=1)
+        services.set_verify_params(db, dev, lim)
+        return redirect("/verify", "核对参数已保存，结果已按新参数重算")
+
     # ------------------------------------------------------------ JSON API
 
     @app.get("/api/status")
@@ -214,6 +272,30 @@ def create_app() -> FastAPI:
     def api_pending():
         pend = services.pending_readings(db)
         return {"count": len(pend), "pending": pend}
+
+    @app.post("/api/reference", status_code=200)
+    async def api_ref_upload(file: UploadFile = File(...),
+                             deviation_s: str = Form(...), temp_limit: str = Form(...)):
+        try:
+            batch_id, n = await handle_ref_upload(file, deviation_s, temp_limit)
+        except ServiceError as exc:
+            return error_json(exc)
+        return {"ref_batch_id": batch_id, "accepted": n}
+
+    @app.get("/api/reference")
+    def api_ref_info():
+        return services.reference_info(db, cfg)
+
+    @app.get("/api/verify")
+    def api_verify(deviation_s: float | None = None, temp_limit: float | None = None):
+        info = services.reference_info(db, cfg)
+        dev = deviation_s if deviation_s is not None else info["deviation_s"]
+        lim = temp_limit if temp_limit is not None else info["temp_limit"]
+        try:
+            dev, lim = services.validate_verify_params(dev, lim)
+        except ServiceError as exc:
+            return error_json(exc)
+        return verify.run_verification(db, dev, lim)
 
     return app
 
